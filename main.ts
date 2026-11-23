@@ -221,18 +221,15 @@ interface Doc {
 
 function readDoc(text: string | null): Doc {
   if (text === null || text === '') return { lines: [], final: false, br: '\n' };
-  let br = '\n';
   const nl = text.indexOf('\n');
-  if (nl > 0 && text[nl - 1] === '\r') br = '\r\n';
+  const br = nl > 0 && text[nl - 1] === '\r' ? '\r\n' : '\n';
   let body = text;
   let final = false;
-  if (body.endsWith('\n')) {
+  if (body.endsWith(br)) {
     final = true;
-    body = body.slice(0, -1);
+    body = body.slice(0, -br.length);
   }
-  if (br === '\r\n' && body.endsWith('\r')) body = body.slice(0, -1);
-  const lines = body.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
-  return { lines, final, br };
+  return { lines: body.split(br), final, br };
 }
 
 function joinDoc(doc: Doc): string {
@@ -488,13 +485,13 @@ function unifiedEdits(lines: string[], strict: boolean): Edit[] {
       const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
       if (m === null) throw new Exit2(`error: parse ${i + 1}`);
       sec = fresh();
-      sec.diffOld = stripPathPrefix(m[1]!);
-      sec.diffNew = stripPathPrefix(m[2]!);
+      sec.diffOld = m[1]!;
+      sec.diffNew = m[2]!;
       sections.push(sec);
       i += 1;
       continue;
     }
-    if (line.startsWith('--- ') && next.startsWith('+++ ') && (sec === null || sec.headerComplete)) {
+    if (line.startsWith('--- ') && next.startsWith('+++ ') && (sec === null || sec.headerComplete || sec.pairSeen)) {
       sec = fresh();
       sections.push(sec);
     }
@@ -608,8 +605,11 @@ function searchReplaceEdits(lines: string[], strict: boolean): Edit[] {
       continue;
     }
     let sep = i + 1;
-    while (sep < lines.length && lines[sep]!.trimEnd() !== '=======') sep += 1;
-    if (sep >= lines.length) throw new Exit2(`error: parse ${i + 1}`);
+    while (sep < lines.length && lines[sep]!.trimEnd() !== '=======') {
+      if (lines[sep]!.trimEnd() === '>>>>>>> REPLACE') break;
+      sep += 1;
+    }
+    if (sep >= lines.length || lines[sep]!.trimEnd() !== '=======') throw new Exit2(`error: parse ${i + 1}`);
     let end = sep + 1;
     while (end < lines.length && lines[end]!.trimEnd() !== '>>>>>>> REPLACE') end += 1;
     if (end >= lines.length) throw new Exit2(`error: parse ${i + 1}`);
@@ -907,34 +907,34 @@ function run(args: string[]): { code: number; out: string[] } {
   if (fails.length > 0) return { code: 1, out: [...fails.map((f) => `error: ${f.code} ${f.path}`), `failed: ${fails.length} of ${edits.length} edits`] };
   const moves: { from: string; to: string }[] = [];
   for (const edit of edits) if (edit.move !== undefined) moves.push(edit.move);
-  const movedFrom = new Set<string>();
-  const movedTo = new Set<string>();
-  for (const m of moves) {
-    movedFrom.add(m.from);
-    movedTo.add(m.to);
-  }
   interface Row {
     key: string;
     text: string;
     apply: () => void;
   }
   const rows: Row[] = [];
+  const handled = new Set<string>();
   for (const m of moves) {
-    const target = tree.now.get(m.to);
-    rows.push({
-      key: m.to,
-      text: `R ${m.from} -> ${m.to}`,
-      apply: () => {
-        if (target !== null && target !== undefined) {
+    const fromBefore = tree.original(m.from);
+    const toBefore = tree.original(m.to);
+    const fromAfter = tree.get(m.from);
+    const toAfter = tree.get(m.to);
+    if (fromBefore !== null && fromAfter === null && toBefore === null && toAfter !== null) {
+      rows.push({
+        key: m.to,
+        text: `R ${m.from} -> ${m.to}`,
+        apply: () => {
           mkdirSync(dirname(m.to), { recursive: true });
-          writeFileSync(m.to, target);
-        }
-        rmSync(m.from, { force: true });
-      },
-    });
+          writeFileSync(m.to, toAfter);
+          rmSync(m.from, { force: true });
+        },
+      });
+      handled.add(m.from);
+      handled.add(m.to);
+    }
   }
   for (const p of tree.now.keys()) {
-    if (movedFrom.has(p) || movedTo.has(p)) continue;
+    if (handled.has(p)) continue;
     const was = tree.original(p);
     const now = tree.now.get(p)!;
     if (was === now) continue;
